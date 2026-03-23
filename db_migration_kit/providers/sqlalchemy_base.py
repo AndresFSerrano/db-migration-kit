@@ -544,6 +544,7 @@ class SqlAlchemyProviderBase(DatabaseProvider):
         desired_tables = desired.by_table_name()
         upgrade_lines: list[str] = []
         downgrade_lines: list[str] = []
+        needs_pgcrypto = False
 
         for table_name, desired_table in sorted(desired_tables.items()):
             current_table = current_tables.get(table_name)
@@ -559,7 +560,9 @@ class SqlAlchemyProviderBase(DatabaseProvider):
             for column_name, desired_column in sorted(desired_columns.items()):
                 if column_name not in current_columns:
                     if not desired_column.nullable and desired_column.default is None:
-                        safe_default = self._safe_default_for_type(desired_column.type_name)
+                        is_unique = self._column_is_unique(column_name, desired_table.indexes)
+                        safe_default, use_pgcrypto = self._safe_default_for_column(desired_column, is_unique)
+                        needs_pgcrypto = needs_pgcrypto or use_pgcrypto
                         upgrade_lines.append(
                             f'op.add_column("{table_name}", {self._render_column_as_nullable(desired_column)})'
                         )
@@ -582,7 +585,9 @@ class SqlAlchemyProviderBase(DatabaseProvider):
                 current_column = current_columns[column_name]
                 if current_column.nullable != desired_column.nullable:
                     if not desired_column.nullable:
-                        safe_default = self._safe_default_for_type(desired_column.type_name)
+                        is_unique = self._column_is_unique(column_name, desired_table.indexes)
+                        safe_default, use_pgcrypto = self._safe_default_for_column(desired_column, is_unique)
+                        needs_pgcrypto = needs_pgcrypto or use_pgcrypto
                         upgrade_lines.append(
                             f'op.execute("UPDATE {table_name} SET {column_name} = {safe_default} WHERE {column_name} IS NULL")'
                         )
@@ -593,6 +598,26 @@ class SqlAlchemyProviderBase(DatabaseProvider):
                         0,
                         f'op.alter_column("{table_name}", "{column_name}", existing_type={self._render_type(desired_column.type_name)}, nullable={current_column.nullable})',
                     )
+
+            # Index changes — always AFTER column ops to avoid unique violations on backfilled data
+            current_indexes = self._filter_auxiliary_fk_indexes(table_name, current_table.by_index_name())
+            desired_indexes = self._filter_auxiliary_fk_indexes(table_name, desired_table.by_index_name())
+            for index_name, desired_index in sorted(desired_indexes.items()):
+                if index_name not in current_indexes:
+                    upgrade_lines.append(
+                        f'op.create_index("{index_name}", "{table_name}", {desired_index.columns!r}, unique={desired_index.unique})'
+                    )
+                    downgrade_lines.insert(0, f'op.drop_index("{index_name}", table_name="{table_name}")')
+            for index_name in sorted(set(current_indexes) - set(desired_indexes)):
+                current_index = current_indexes[index_name]
+                upgrade_lines.append(f'op.drop_index("{index_name}", table_name="{table_name}")')
+                downgrade_lines.insert(
+                    0,
+                    f'op.create_index("{index_name}", "{table_name}", {current_index.columns!r}, unique={current_index.unique})',
+                )
+
+        if needs_pgcrypto:
+            upgrade_lines.insert(0, 'op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")')
 
         return {"upgrade": upgrade_lines, "downgrade": downgrade_lines}
 
@@ -631,23 +656,30 @@ class SqlAlchemyProviderBase(DatabaseProvider):
         )
 
     @staticmethod
-    def _safe_default_for_type(type_name: str) -> str:
-        normalized = type_name.lower()
+    def _column_is_unique(column_name: str, indexes: list[IndexSchema]) -> bool:
+        return any(index.unique and index.columns == [column_name] for index in indexes)
+
+    @staticmethod
+    def _safe_default_for_column(column: ColumnSchema, unique: bool) -> tuple[str, bool]:
+        """Returns (sql_expression, needs_pgcrypto)."""
+        normalized = column.type_name.lower()
         if normalized == "uuid":
-            return "gen_random_uuid()"
+            return "gen_random_uuid()", True
         if normalized in {"varchar", "string"}:
-            return "''"
+            if unique:
+                return "gen_random_uuid()::text", True
+            return "''", False
         if normalized == "integer":
-            return "0"
+            return "0", False
         if normalized == "boolean":
-            return "false"
+            return "false", False
         if normalized == "float":
-            return "0.0"
+            return "0.0", False
         if normalized in {"datetime", "timestamp without time zone"}:
-            return "now()"
+            return "now()", False
         if normalized == "date":
-            return "current_date"
-        return "null"
+            return "current_date", False
+        return "null", False
 
     def _render_type(self, type_name: str) -> str:
         normalized = type_name.lower()

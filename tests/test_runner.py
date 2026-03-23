@@ -532,10 +532,12 @@ def test_build_revision_operations_generates_three_step_migration_for_not_null_c
     assert not any("add_column" in line and "nullable=False" in line for line in upgrade), \
         "No debe generar op.add_column con nullable=False directamente"
 
+    idx_pgcrypto = next(i for i, l in enumerate(upgrade) if "pgcrypto" in l)
     idx_add = next(i for i, l in enumerate(upgrade) if "nullable=True" in l and "feature_resource_id" in l)
-    idx_update = next(i for i, l in enumerate(upgrade) if "gen_random_uuid()" in l)
+    idx_update = next(i for i, l in enumerate(upgrade) if "gen_random_uuid()" in l and "feature_resource_id" in l)
     idx_alter = next(i for i, l in enumerate(upgrade) if "nullable=False" in l and "feature_resource_id" in l)
-    assert idx_add < idx_update < idx_alter, "Los 3 pasos deben estar en orden: add → update → alter"
+    assert idx_pgcrypto < idx_add < idx_update < idx_alter, \
+        "Orden: pgcrypto → add(nullable) → update → alter(not null)"
 
 
 def test_build_revision_operations_backfills_before_alter_when_setting_not_null() -> None:
@@ -573,6 +575,110 @@ def test_build_revision_operations_backfills_before_alter_when_setting_not_null(
     idx_update = next(i for i, l in enumerate(upgrade) if "UPDATE items SET code" in l)
     idx_alter = next(i for i, l in enumerate(upgrade) if "alter_column" in l and "code" in l)
     assert idx_update < idx_alter, "El UPDATE debe ir antes del alter_column"
+
+
+def test_build_revision_operations_uses_unique_default_for_unique_string_column() -> None:
+    provider = SqlAlchemyPostgresProvider()
+    current = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="security_role_permissions",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                ],
+            )
+        ],
+    )
+    desired = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="security_role_permissions",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_feature_resource_key", type_name="varchar", nullable=False),
+                ],
+                indexes=[
+                    IndexSchema(name="uniq_role_feature_resource_key", columns=["role_feature_resource_key"], unique=True)
+                ],
+            )
+        ],
+    )
+
+    ops = provider._build_revision_operations(current=current, desired=desired)
+    upgrade = ops["upgrade"]
+
+    assert any("gen_random_uuid()::text" in line for line in upgrade), \
+        "Columna string con unique debe usar gen_random_uuid()::text, no ''"
+    assert not any("= ''" in line for line in upgrade), \
+        "No debe usar valor constante '' en columna con unique constraint"
+
+    idx_alter = next(i for i, l in enumerate(upgrade) if "alter_column" in l and "role_feature_resource_key" in l)
+    idx_index = next(i for i, l in enumerate(upgrade) if "create_index" in l)
+    assert idx_alter < idx_index, "El índice único debe crearse DESPUÉS del alter_column NOT NULL"
+
+
+def test_build_revision_operations_adds_index_for_existing_table() -> None:
+    provider = SqlAlchemyPostgresProvider()
+    current = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="items",
+                columns=[ColumnSchema(name="id", type_name="uuid", nullable=False)],
+                indexes=[],
+            )
+        ],
+    )
+    desired = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="items",
+                columns=[ColumnSchema(name="id", type_name="uuid", nullable=False)],
+                indexes=[IndexSchema(name="uniq_items_id", columns=["id"], unique=True)],
+            )
+        ],
+    )
+
+    ops = provider._build_revision_operations(current=current, desired=desired)
+    upgrade = ops["upgrade"]
+    downgrade = ops["downgrade"]
+
+    assert any("create_index" in l and "uniq_items_id" in l for l in upgrade)
+    assert any("drop_index" in l and "uniq_items_id" in l for l in downgrade)
+
+
+def test_build_revision_operations_no_pgcrypto_for_non_uuid_columns() -> None:
+    provider = SqlAlchemyPostgresProvider()
+    current = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="items",
+                columns=[ColumnSchema(name="id", type_name="uuid", nullable=False)],
+            )
+        ],
+    )
+    desired = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="items",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="count", type_name="integer", nullable=False),
+                ],
+            )
+        ],
+    )
+
+    ops = provider._build_revision_operations(current=current, desired=desired)
+    upgrade = ops["upgrade"]
+
+    assert not any("pgcrypto" in l for l in upgrade), \
+        "No debe agregar pgcrypto si no se usa gen_random_uuid()"
 
 
 def test_postgres_provider_marks_missing_lazy_tables_as_pending() -> None:
