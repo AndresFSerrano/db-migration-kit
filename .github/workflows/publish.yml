@@ -1,0 +1,54 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v3
+        with:
+          poetry-version: "2.3.2"
+
+      - name: Configure Poetry virtualenv
+        run: poetry config virtualenvs.in-project true
+
+      - name: Install dependencies
+        run: poetry install --with dev --no-interaction
+
+      - name: Validate package metadata
+        run: poetry check
+
+      - name: Run tests
+        run: poetry run pytest -q
+
+      - name: Build package
+        run: poetry build
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-release
+          path: dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

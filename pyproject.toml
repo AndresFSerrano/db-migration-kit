@@ -1,0 +1,53 @@
+[tool.poetry]
+name = "db-migration-kit"
+version = "1.0.0"
+description = "Reusable Postgres migration bootstrap and execution toolkit"
+authors = ["Andres Felipe Serrano Barrios <andresfserrano1@gmail.com>"]
+readme = "README.md"
+license = "MIT"
+packages = [{ include = "db_migration_kit" }]
+include = ["db_migration_kit/py.typed"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
+  "Typing :: Typed",
+]
+keywords = ["postgres", "alembic", "migration", "rds", "ecs"]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+alembic = "^1.15.2"
+sqlalchemy = {extras = ["asyncio"], version = "^2.0.43"}
+psycopg = {version = "^3.2.0", extras = ["binary"]}
+typing-extensions = "^4.12.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+poethepoet = "^0.38.0"
+
+[tool.poetry.scripts]
+db-migration-kit = "db_migration_kit.cli:main"
+
+[tool.poe.tasks]
+test = "pytest -q"
+init = "db-migration-kit init"
+doctor = "db-migration-kit doctor"
+current = "db-migration-kit current"
+history = "db-migration-kit history"
+upgrade = "db-migration-kit upgrade"
+downgrade = "db-migration-kit downgrade"
+stamp = "db-migration-kit stamp"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
