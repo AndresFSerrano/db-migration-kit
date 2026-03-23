@@ -492,6 +492,89 @@ def test_runner_apply_snapshot_uses_specific_revision(tmp_path: Path) -> None:
     assert provider.applied_revision == "rev_002"
 
 
+def test_build_revision_operations_generates_three_step_migration_for_not_null_column() -> None:
+    provider = SqlAlchemyPostgresProvider()
+    current = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="security_role_permissions",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_id", type_name="uuid", nullable=False),
+                ],
+            )
+        ],
+    )
+    desired = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="security_role_permissions",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="feature_resource_id", type_name="uuid", nullable=False),
+                ],
+            )
+        ],
+    )
+
+    ops = provider._build_revision_operations(current=current, desired=desired)
+    upgrade = ops["upgrade"]
+
+    assert any("nullable=True" in line and "feature_resource_id" in line for line in upgrade), \
+        "Step 1: debe agregar la columna como nullable=True"
+    assert any("gen_random_uuid()" in line and "feature_resource_id" in line for line in upgrade), \
+        "Step 2: debe hacer UPDATE con gen_random_uuid() antes de imponer NOT NULL"
+    assert any("nullable=False" in line and "feature_resource_id" in line for line in upgrade), \
+        "Step 3: debe imponer nullable=False via alter_column"
+    assert not any("add_column" in line and "nullable=False" in line for line in upgrade), \
+        "No debe generar op.add_column con nullable=False directamente"
+
+    idx_add = next(i for i, l in enumerate(upgrade) if "nullable=True" in l and "feature_resource_id" in l)
+    idx_update = next(i for i, l in enumerate(upgrade) if "gen_random_uuid()" in l)
+    idx_alter = next(i for i, l in enumerate(upgrade) if "nullable=False" in l and "feature_resource_id" in l)
+    assert idx_add < idx_update < idx_alter, "Los 3 pasos deben estar en orden: add → update → alter"
+
+
+def test_build_revision_operations_backfills_before_alter_when_setting_not_null() -> None:
+    provider = SqlAlchemyPostgresProvider()
+    current = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="items",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="code", type_name="varchar", nullable=True),
+                ],
+            )
+        ],
+    )
+    desired = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="items",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="code", type_name="varchar", nullable=False),
+                ],
+            )
+        ],
+    )
+
+    ops = provider._build_revision_operations(current=current, desired=desired)
+    upgrade = ops["upgrade"]
+
+    assert any("UPDATE items SET code" in line for line in upgrade), \
+        "Debe hacer backfill antes de imponer NOT NULL en columna existente"
+    idx_update = next(i for i, l in enumerate(upgrade) if "UPDATE items SET code" in l)
+    idx_alter = next(i for i, l in enumerate(upgrade) if "alter_column" in l and "code" in l)
+    assert idx_update < idx_alter, "El UPDATE debe ir antes del alter_column"
+
+
 def test_postgres_provider_marks_missing_lazy_tables_as_pending() -> None:
     provider = SqlAlchemyPostgresProvider()
     current = SchemaSnapshot(provider_name=provider.name, tables=[])

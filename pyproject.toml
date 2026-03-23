@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "db-migration-kit"
-version = "1.0.0"
+version = "1.1.0"
 description = "Reusable Postgres migration bootstrap and execution toolkit"
 authors = ["Andres Felipe Serrano Barrios <andresfserrano1@gmail.com>"]
 readme = "README.md"

@@ -558,9 +558,22 @@ class SqlAlchemyProviderBase(DatabaseProvider):
             desired_columns = desired_table.by_column_name()
             for column_name, desired_column in sorted(desired_columns.items()):
                 if column_name not in current_columns:
-                    upgrade_lines.append(
-                        f'op.add_column("{table_name}", {self._render_column(desired_column)})'
-                    )
+                    if not desired_column.nullable and desired_column.default is None:
+                        safe_default = self._safe_default_for_type(desired_column.type_name)
+                        upgrade_lines.append(
+                            f'op.add_column("{table_name}", {self._render_column_as_nullable(desired_column)})'
+                        )
+                        upgrade_lines.append(
+                            f'op.execute("UPDATE {table_name} SET {column_name} = {safe_default} WHERE {column_name} IS NULL")'
+                        )
+                        upgrade_lines.append(
+                            f'op.alter_column("{table_name}", "{column_name}", '
+                            f'existing_type={self._render_type(desired_column.type_name)}, nullable=False)'
+                        )
+                    else:
+                        upgrade_lines.append(
+                            f'op.add_column("{table_name}", {self._render_column(desired_column)})'
+                        )
                     downgrade_lines.insert(
                         0,
                         f'op.drop_column("{table_name}", "{column_name}")',
@@ -568,6 +581,11 @@ class SqlAlchemyProviderBase(DatabaseProvider):
                     continue
                 current_column = current_columns[column_name]
                 if current_column.nullable != desired_column.nullable:
+                    if not desired_column.nullable:
+                        safe_default = self._safe_default_for_type(desired_column.type_name)
+                        upgrade_lines.append(
+                            f'op.execute("UPDATE {table_name} SET {column_name} = {safe_default} WHERE {column_name} IS NULL")'
+                        )
                     upgrade_lines.append(
                         f'op.alter_column("{table_name}", "{column_name}", existing_type={self._render_type(current_column.type_name)}, nullable={desired_column.nullable})'
                     )
@@ -605,6 +623,31 @@ class SqlAlchemyProviderBase(DatabaseProvider):
             f'sa.Column("{column.name}", {self._render_type(column.type_name)}, '
             f'nullable={column.nullable})'
         )
+
+    def _render_column_as_nullable(self, column: ColumnSchema) -> str:
+        return (
+            f'sa.Column("{column.name}", {self._render_type(column.type_name)}, '
+            f'nullable=True)'
+        )
+
+    @staticmethod
+    def _safe_default_for_type(type_name: str) -> str:
+        normalized = type_name.lower()
+        if normalized == "uuid":
+            return "gen_random_uuid()"
+        if normalized in {"varchar", "string"}:
+            return "''"
+        if normalized == "integer":
+            return "0"
+        if normalized == "boolean":
+            return "false"
+        if normalized == "float":
+            return "0.0"
+        if normalized in {"datetime", "timestamp without time zone"}:
+            return "now()"
+        if normalized == "date":
+            return "current_date"
+        return "null"
 
     def _render_type(self, type_name: str) -> str:
         normalized = type_name.lower()
