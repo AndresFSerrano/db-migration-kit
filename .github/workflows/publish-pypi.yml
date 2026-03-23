@@ -1,0 +1,84 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  guard-main:
+    name: Verify release tag is on main HEAD
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tag commit equals origin/main HEAD
+        run: |
+          git fetch origin main
+          TAG_SHA="${GITHUB_SHA}"
+          MAIN_SHA="$(git rev-parse origin/main)"
+          if [ "$TAG_SHA" != "$MAIN_SHA" ]; then
+            echo "Release tag commit ($TAG_SHA) is not main HEAD ($MAIN_SHA)."
+            exit 1
+          fi
+
+  build:
+    name: Build distribution artifacts
+    needs: guard-main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v3
+        with:
+          poetry-version: "2.3.2"
+
+      - name: Configure Poetry virtualenv
+        run: poetry config virtualenvs.in-project true
+
+      - name: Install dependencies
+        run: poetry install --with dev --no-interaction
+
+      - name: Validate package metadata
+        run: poetry check
+
+      - name: Run tests
+        run: poetry run pytest -q
+
+      - name: Build package
+        run: poetry build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish package to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/project/db-migration-kit/
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
