@@ -557,6 +557,47 @@ class SqlAlchemyProviderBase(DatabaseProvider):
 
             current_columns = current_table.by_column_name()
             desired_columns = desired_table.by_column_name()
+            current_fk_by_sig = {_fk_signature(fk): fk for fk in current_table.foreign_keys}
+            desired_fk_by_sig = {_fk_signature(fk): fk for fk in desired_table.foreign_keys}
+
+            # Pre-check: TRUNCATE upfront when we'd create a unique index or FK on columns
+            # that already exist — those columns may have duplicate/invalid backfill data.
+            current_idx_map = self._filter_auxiliary_fk_indexes(table_name, current_table.by_index_name())
+            desired_idx_map = self._filter_auxiliary_fk_indexes(table_name, desired_table.by_index_name())
+            new_unique_on_existing = any(
+                desired_index.unique
+                and index_name not in current_idx_map
+                and any(col in current_columns for col in desired_index.columns)
+                for index_name, desired_index in desired_idx_map.items()
+            )
+            new_fk_on_existing = any(
+                col in current_columns
+                for sig, fk in desired_fk_by_sig.items()
+                if sig not in current_fk_by_sig
+                for col in fk.constrained_columns
+            )
+            if new_unique_on_existing or new_fk_on_existing:
+                upgrade_lines.append(f'op.execute("TRUNCATE TABLE {table_name} CASCADE")')
+
+            # Phase 1: drop FKs no longer desired (before dropping columns they reference)
+            for sig, current_fk in sorted(current_fk_by_sig.items()):
+                if sig not in desired_fk_by_sig:
+                    upgrade_lines.append(
+                        f'op.drop_constraint("{current_fk.name}", "{table_name}", type_="foreignkey")'
+                    )
+                    downgrade_lines.insert(
+                        0,
+                        f'op.create_foreign_key("{current_fk.name}", "{table_name}", '
+                        f'"{current_fk.referred_table}", {current_fk.constrained_columns!r}, {current_fk.referred_columns!r})',
+                    )
+
+            # Phase 2: drop columns no longer desired (after FKs referencing them are dropped)
+            for column_name in sorted(set(current_columns) - set(desired_columns)):
+                current_col = current_columns[column_name]
+                upgrade_lines.append(f'op.drop_column("{table_name}", "{column_name}")')
+                downgrade_lines.insert(0, f'op.add_column("{table_name}", {self._render_column(current_col)})')
+
+            # Phase 3: add new columns and handle nullable changes
             for column_name, desired_column in sorted(desired_columns.items()):
                 if column_name not in current_columns:
                     if not desired_column.nullable and desired_column.default is None:
@@ -599,7 +640,7 @@ class SqlAlchemyProviderBase(DatabaseProvider):
                         f'op.alter_column("{table_name}", "{column_name}", existing_type={self._render_type(desired_column.type_name)}, nullable={current_column.nullable})',
                     )
 
-            # Index changes — always AFTER column ops to avoid unique violations on backfilled data
+            # Phase 4: index changes — always AFTER column ops to avoid unique violations
             current_indexes = self._filter_auxiliary_fk_indexes(table_name, current_table.by_index_name())
             desired_indexes = self._filter_auxiliary_fk_indexes(table_name, desired_table.by_index_name())
             for index_name, desired_index in sorted(desired_indexes.items()):
@@ -615,6 +656,18 @@ class SqlAlchemyProviderBase(DatabaseProvider):
                     0,
                     f'op.create_index("{index_name}", "{table_name}", {current_index.columns!r}, unique={current_index.unique})',
                 )
+
+            # Phase 5: add new FKs — after columns and indexes are in place
+            new_fks = [(sig, fk) for sig, fk in sorted(desired_fk_by_sig.items()) if sig not in current_fk_by_sig]
+            for sig, desired_fk in new_fks:
+                upgrade_lines.append(
+                    f'op.create_foreign_key("{desired_fk.name}", "{table_name}", '
+                    f'"{desired_fk.referred_table}", {desired_fk.constrained_columns!r}, {desired_fk.referred_columns!r})'
+                )
+                downgrade_lines.insert(
+                        0,
+                        f'op.drop_constraint("{desired_fk.name}", "{table_name}", type_="foreignkey")',
+                    )
 
         if needs_pgcrypto:
             upgrade_lines.insert(0, 'op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")')

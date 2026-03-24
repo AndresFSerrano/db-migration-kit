@@ -681,6 +681,129 @@ def test_build_revision_operations_no_pgcrypto_for_non_uuid_columns() -> None:
         "No debe agregar pgcrypto si no se usa gen_random_uuid()"
 
 
+def test_build_revision_operations_generates_fk_and_column_drop_for_existing_table() -> None:
+    provider = SqlAlchemyPostgresProvider()
+    current = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="security_role_permissions",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_feature_key", type_name="varchar", nullable=False),
+                    ColumnSchema(name="role_feature_resource_key", type_name="varchar", nullable=False),
+                ],
+                indexes=[
+                    IndexSchema(name="uniq_role_feature_key_security_role_permissions", columns=["role_feature_key"], unique=True),
+                ],
+                foreign_keys=[],
+            )
+        ],
+    )
+    desired = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="security_role_permissions",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="feature_resource_id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_feature_resource_key", type_name="varchar", nullable=False),
+                ],
+                indexes=[
+                    IndexSchema(name="uniq_role_feature_resource_key_security_role_permissions", columns=["role_feature_resource_key"], unique=True),
+                ],
+                foreign_keys=[
+                    ForeignKeySchema(
+                        name="fk_security_role_permissions_feature_resource_id",
+                        constrained_columns=["feature_resource_id"],
+                        referred_table="security_feature_resources",
+                        referred_columns=["id"],
+                    )
+                ],
+            )
+        ],
+    )
+
+    ops = provider._build_revision_operations(current=current, desired=desired)
+    upgrade = ops["upgrade"]
+    downgrade = ops["downgrade"]
+
+    assert any("drop_column" in l and "role_feature_key" in l for l in upgrade), \
+        "Debe generar drop_column para la columna eliminada"
+    assert any("create_foreign_key" in l and "fk_security_role_permissions_feature_resource_id" in l for l in upgrade), \
+        "Debe generar create_foreign_key para la FK nueva"
+    assert any("drop_index" in l and "uniq_role_feature_key" in l for l in upgrade), \
+        "Debe eliminar el índice viejo"
+    assert any("create_index" in l and "uniq_role_feature_resource_key" in l for l in upgrade), \
+        "Debe crear el índice nuevo"
+
+    # Orden: drop FK → drop column → add column → drop index → add index → add FK
+    idx_drop_col = next(i for i, l in enumerate(upgrade) if "drop_column" in l and "role_feature_key" in l)
+    idx_add_col = next(i for i, l in enumerate(upgrade) if "add_column" in l and "feature_resource_id" in l)
+    idx_add_index = next(i for i, l in enumerate(upgrade) if "create_index" in l)
+    idx_add_fk = next(i for i, l in enumerate(upgrade) if "create_foreign_key" in l)
+    assert idx_drop_col < idx_add_col, "drop_column debe ir antes de add_column"
+    assert idx_add_col < idx_add_index, "add_column debe ir antes de create_index"
+    assert idx_add_index < idx_add_fk, "create_index debe ir antes de create_foreign_key"
+
+    assert any("drop_constraint" in l and "fk_security_role_permissions_feature_resource_id" in l for l in downgrade), \
+        "downgrade debe tener drop_constraint para la FK"
+    assert any("add_column" in l and "role_feature_key" in l for l in downgrade), \
+        "downgrade debe restaurar la columna eliminada"
+
+
+def test_build_revision_operations_truncates_before_unique_index_on_existing_column() -> None:
+    """TRUNCATE must appear before index/FK ops when adding a unique index on a preexisting column."""
+    provider = SqlAlchemyPostgresProvider()
+    current = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="security_role_permissions",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_feature_resource_key", type_name="varchar", nullable=False),
+                ],
+                indexes=[],
+                foreign_keys=[],
+            )
+        ],
+    )
+    desired = SchemaSnapshot(
+        provider_name=provider.name,
+        tables=[
+            TableSchema(
+                name="security_role_permissions",
+                columns=[
+                    ColumnSchema(name="id", type_name="uuid", nullable=False),
+                    ColumnSchema(name="role_feature_resource_key", type_name="varchar", nullable=False),
+                ],
+                indexes=[
+                    IndexSchema(
+                        name="uniq_role_feature_resource_key_security_role_permissions",
+                        columns=["role_feature_resource_key"],
+                        unique=True,
+                    )
+                ],
+                foreign_keys=[],
+            )
+        ],
+    )
+
+    ops = provider._build_revision_operations(current=current, desired=desired)
+    upgrade = ops["upgrade"]
+
+    assert any("TRUNCATE TABLE security_role_permissions CASCADE" in l for l in upgrade), \
+        "Debe emitir TRUNCATE cuando se crea un índice único sobre una columna preexistente"
+
+    idx_truncate = next(i for i, l in enumerate(upgrade) if "TRUNCATE" in l)
+    idx_create_index = next(i for i, l in enumerate(upgrade) if "create_index" in l)
+    assert idx_truncate < idx_create_index, "TRUNCATE debe ir antes del create_index"
+
+
 def test_postgres_provider_marks_missing_lazy_tables_as_pending() -> None:
     provider = SqlAlchemyPostgresProvider()
     current = SchemaSnapshot(provider_name=provider.name, tables=[])
