@@ -641,21 +641,33 @@ class SqlAlchemyProviderBase(DatabaseProvider):
                     )
 
             # Phase 4: index changes — always AFTER column ops to avoid unique violations
+            # Drop-before-create to avoid conflicts on columns that get re-indexed.
+            # Skip explicit drop for indexes whose columns are ALL being dropped —
+            # PostgreSQL automatically removes those when the column is dropped.
+            dropped_column_names = set(current_columns) - set(desired_columns)
             current_indexes = self._filter_auxiliary_fk_indexes(table_name, current_table.by_index_name())
             desired_indexes = self._filter_auxiliary_fk_indexes(table_name, desired_table.by_index_name())
+            for index_name in sorted(set(current_indexes) - set(desired_indexes)):
+                current_index = current_indexes[index_name]
+                if all(col in dropped_column_names for col in current_index.columns):
+                    # Index will be auto-dropped by PostgreSQL with the column — skip explicit drop.
+                    # Downgrade only needs to recreate it if the column is also restored.
+                    downgrade_lines.insert(
+                        0,
+                        f'op.create_index("{index_name}", "{table_name}", {current_index.columns!r}, unique={current_index.unique})',
+                    )
+                    continue
+                upgrade_lines.append(f'op.drop_index("{index_name}", table_name="{table_name}")')
+                downgrade_lines.insert(
+                    0,
+                    f'op.create_index("{index_name}", "{table_name}", {current_index.columns!r}, unique={current_index.unique})',
+                )
             for index_name, desired_index in sorted(desired_indexes.items()):
                 if index_name not in current_indexes:
                     upgrade_lines.append(
                         f'op.create_index("{index_name}", "{table_name}", {desired_index.columns!r}, unique={desired_index.unique})'
                     )
                     downgrade_lines.insert(0, f'op.drop_index("{index_name}", table_name="{table_name}")')
-            for index_name in sorted(set(current_indexes) - set(desired_indexes)):
-                current_index = current_indexes[index_name]
-                upgrade_lines.append(f'op.drop_index("{index_name}", table_name="{table_name}")')
-                downgrade_lines.insert(
-                    0,
-                    f'op.create_index("{index_name}", "{table_name}", {current_index.columns!r}, unique={current_index.unique})',
-                )
 
             # Phase 5: add new FKs — after columns and indexes are in place
             new_fks = [(sig, fk) for sig, fk in sorted(desired_fk_by_sig.items()) if sig not in current_fk_by_sig]

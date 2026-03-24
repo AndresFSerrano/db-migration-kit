@@ -735,8 +735,8 @@ def test_build_revision_operations_generates_fk_and_column_drop_for_existing_tab
         "Debe generar drop_column para la columna eliminada"
     assert any("create_foreign_key" in l and "fk_security_role_permissions_feature_resource_id" in l for l in upgrade), \
         "Debe generar create_foreign_key para la FK nueva"
-    assert any("drop_index" in l and "uniq_role_feature_key" in l for l in upgrade), \
-        "Debe eliminar el índice viejo"
+    assert not any("drop_index" in l and "uniq_role_feature_key" in l for l in upgrade), \
+        "NO debe emitir drop_index para un índice cuya columna ya se elimina (PostgreSQL lo borra automáticamente)"
     assert any("create_index" in l and "uniq_role_feature_resource_key" in l for l in upgrade), \
         "Debe crear el índice nuevo"
 
